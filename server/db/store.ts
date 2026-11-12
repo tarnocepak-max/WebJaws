@@ -498,8 +498,99 @@ export class WebJawsStore {
       created_at: new Date().toISOString(),
     });
 
-    // Staff accounts must be created by the secured Superadmin bootstrap flow.
-    this.users = [];
+    // 2. Default Seed Users (In-memory mock active when PostgreSQL is not configured)
+    const salt = bcrypt.genSaltSync(10);
+    const defaultStaff: StaffUser[] = [
+      {
+        id: 'usr-superadmin-01',
+        username: 'superadmin',
+        email: 'superadmin@webjaws.internal',
+        password_hash: bcrypt.hashSync('AdminWebJaws2026!', salt),
+        full_name: 'Super Administrator',
+        role: 'Superadmin',
+        phone: '081234567890',
+        is_active: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      {
+        id: 'usr-admin-demo',
+        username: 'admin',
+        email: 'adminjaws@mora.jaws',
+        password_hash: bcrypt.hashSync('1234', salt),
+        full_name: 'WebJaws Demo Admin',
+        role: 'Superadmin',
+        phone: '081234567899',
+        is_active: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      {
+        id: 'usr-agent-01',
+        username: 'agent.dispatch',
+        email: 'agent.dispatch@webjaws.internal',
+        password_hash: bcrypt.hashSync('AgentWebJaws2026!', salt),
+        full_name: 'Dewi Sartika (Agent Dispatch)',
+        role: 'Agent Dispatch',
+        phone: '081234567891',
+        is_active: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      {
+        id: 'usr-leader-01',
+        username: 'leader.mora',
+        email: 'leader.mora@webjaws.internal',
+        password_hash: bcrypt.hashSync('LeaderWebJaws2026!', salt),
+        full_name: 'Rian Pratama (Leader)',
+        role: 'Leader',
+        contractor_name: 'PT Fiber Optik Nusantara',
+        area: 'Jakarta Selatan',
+        phone: '081234567892',
+        is_active: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      {
+        id: 'usr-installer-01',
+        username: 'teknisi.budi',
+        email: 'budi.santoso@webjaws.internal',
+        password_hash: bcrypt.hashSync('TeknisiWebJaws2026!', salt),
+        full_name: 'Budi Santoso (Installer)',
+        role: 'Installer',
+        contractor_name: 'PT Fiber Optik Nusantara',
+        area: 'Jakarta Selatan',
+        phone: '081234567893',
+        is_active: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      {
+        id: 'usr-monitor-01',
+        username: 'monitoring.staff',
+        email: 'monitoring@webjaws.internal',
+        password_hash: bcrypt.hashSync('MonitorWebJaws2026!', salt),
+        full_name: 'Siti Handayani (Monitoring)',
+        role: 'Monitoring Data',
+        phone: '081234567894',
+        is_active: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      {
+        id: 'usr-itsupport-01',
+        username: 'itsupport.staff',
+        email: 'itsupport@webjaws.internal',
+        password_hash: bcrypt.hashSync('ITSupportWebJaws2026!', salt),
+        full_name: 'Faisal Akbar (IT Support)',
+        role: 'IT Support Application',
+        phone: '081234567895',
+        is_active: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ];
+    this.users = defaultStaff;
 
     // 3. Default Dropdown Options
     const defaultDropdowns: Array<Omit<DropdownOption, 'id'>> = [

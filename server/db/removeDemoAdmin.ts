@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 import { pool, checkConnection } from './db.js';
 
-dotenv.config();
+dotenv.config({ override: true });
 
 async function removeDemoAdmin() {
   console.log('[WebJaws Cleanup] Starting safe removal of Demo Superadmin account...');

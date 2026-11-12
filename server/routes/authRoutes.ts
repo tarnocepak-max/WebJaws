@@ -14,6 +14,8 @@ import {
   recordPostgresLoginAttempt,
   checkPostgresRateLimit,
   addPostgresAuditLog,
+  hashSessionToken,
+  getSessionCookieOptions,
 } from '../auth/auth.js';
 
 export const authRouter = Router();
@@ -105,12 +107,7 @@ authRouter.post('/login', async (req, res) => {
     const session = await createPostgresSession(user.id, ip, userAgent, safeDurationHours);
 
     // Set secure HttpOnly cookie
-    res.cookie(SESSION_COOKIE_NAME, session.token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: safeDurationHours * 3600 * 1000,
-    });
+    res.cookie(SESSION_COOKIE_NAME, session.token, getSessionCookieOptions(safeDurationHours));
 
     // Write audit log in PostgreSQL audit_logs
     await addPostgresAuditLog({
@@ -147,13 +144,14 @@ authRouter.post('/logout', async (req: AuthenticatedRequest, res: Response) => {
 
   if (token) {
     try {
+      const tokenHash = hashSessionToken(token);
       // Find session to log user info before deleting
       const sessionRes = await query(
         `SELECT s.user_id, u.full_name, u.role
          FROM auth_sessions s
          LEFT JOIN staff_users u ON s.user_id = u.id
-         WHERE s.token = $1`,
-        [token]
+         WHERE s.token_hash = $1 OR s.token = $2`,
+        [tokenHash, token]
       );
       if (sessionRes.rowCount && sessionRes.rows[0]) {
         const row = sessionRes.rows[0];
@@ -173,11 +171,7 @@ authRouter.post('/logout', async (req: AuthenticatedRequest, res: Response) => {
     }
   }
 
-  res.clearCookie(SESSION_COOKIE_NAME, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
-  });
+  res.clearCookie(SESSION_COOKIE_NAME, getSessionCookieOptions());
 
   return res.json({
     success: true,
@@ -205,11 +199,7 @@ authRouter.post('/logout-all', requireAuth, async (req: AuthenticatedRequest, re
     console.error('Logout-all error:', err.message);
   }
 
-  res.clearCookie(SESSION_COOKIE_NAME, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
-  });
+  res.clearCookie(SESSION_COOKIE_NAME, getSessionCookieOptions());
 
   return res.json({
     success: true,

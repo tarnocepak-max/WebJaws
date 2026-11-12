@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
-import { query } from '../db/db.js';
-import { StaffUser, AuthSession } from '../db/store.js';
+import { query, checkConnection } from '../db/db.js';
+import { StaffUser, AuthSession, webJawsStore } from '../db/store.js';
 
 export interface AuthenticatedRequest extends Request {
   user?: StaffUser;
@@ -10,10 +10,34 @@ export interface AuthenticatedRequest extends Request {
 
 export const SESSION_COOKIE_NAME = 'webjaws_session';
 
+/**
+ * Deterministic cryptographic one-way SHA-256 hash for session tokens.
+ * Plaintext token is only possessed by the client browser cookie,
+ * while PostgreSQL strictly stores the token_hash.
+ */
+export function hashSessionToken(token: string): string {
+  if (!token) return '';
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
 export function getClientIp(req: Request): string {
   const forwarded = req.headers['x-forwarded-for'];
   if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
   return req.socket.remoteAddress || '127.0.0.1';
+}
+
+/**
+ * Standard secure cookie options for session cookie
+ */
+export function getSessionCookieOptions(durationHours = 24) {
+  const safeHours = Number.isFinite(durationHours) && durationHours >= 1 && durationHours <= 720 ? durationHours : 24;
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax' as const,
+    maxAge: safeHours * 3600 * 1000,
+    path: '/',
+  };
 }
 
 // Session credentials are accepted only from the HttpOnly cookie.
@@ -22,35 +46,61 @@ export function extractSessionToken(req: Request): string | null {
   return typeof token === 'string' && token.length > 0 ? token : null;
 }
 
-// Create a cryptographically secure session stored in PostgreSQL auth_sessions
+/**
+ * Creates a cryptographically secure random session.
+ * Stores only token_hash in PostgreSQL auth_sessions.
+ * Returns AuthSession containing the raw plaintext token for the Set-Cookie header.
+ */
 export async function createPostgresSession(
   userId: string,
   ip: string,
   userAgent: string,
   durationHours = 24
 ): Promise<AuthSession> {
-  const token = crypto.randomBytes(48).toString('hex');
+  const rawToken = crypto.randomBytes(48).toString('hex');
+  const tokenHash = hashSessionToken(rawToken);
   const safeDuration = Number.isFinite(durationHours) && durationHours >= 1 && durationHours <= 720 ? durationHours : 24;
   const expiresAt = new Date(Date.now() + safeDuration * 3600 * 1000);
 
-  const res = await query<AuthSession>(
-    `INSERT INTO auth_sessions (token, user_id, ip_address, user_agent, expires_at, last_active_at, created_at)
-     VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-     RETURNING id, token, user_id, ip_address, user_agent, expires_at, last_active_at, created_at`,
-    [token, userId, ip, userAgent, expiresAt.toISOString()]
-  );
+  const dbStatus = await checkConnection();
+  if (dbStatus.connected) {
+    const res = await query(
+      `INSERT INTO auth_sessions (token_hash, user_id, ip_address, user_agent, expires_at, last_active_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+       RETURNING id, token_hash, user_id, ip_address, user_agent, expires_at, last_active_at, created_at`,
+      [tokenHash, userId, ip, userAgent, expiresAt.toISOString()]
+    );
 
-  return res.rows[0];
+    const row = res.rows[0];
+    return {
+      id: row.id,
+      token: rawToken, // Client-only raw token
+      user_id: row.user_id,
+      ip_address: row.ip_address,
+      user_agent: row.user_agent,
+      expires_at: row.expires_at,
+      last_active_at: row.last_active_at,
+      created_at: row.created_at,
+    };
+  }
+
+  // Fallback to in-memory store
+  return webJawsStore.createSession(userId, ip, userAgent, safeDuration);
 }
 
-// Revoke a specific session from PostgreSQL
-export async function revokePostgresSession(token: string): Promise<void> {
-  if (!token) return;
+// Revoke a specific session from PostgreSQL using token hash
+export async function revokePostgresSession(rawToken: string): Promise<void> {
+  if (!rawToken) return;
+  const tokenHash = hashSessionToken(rawToken);
+
   try {
-    await query('DELETE FROM auth_sessions WHERE token = $1', [token]);
+    await query('DELETE FROM auth_sessions WHERE token_hash = $1 OR token = $2', [tokenHash, rawToken]);
   } catch (err: any) {
     console.error('Error revoking session from PostgreSQL:', err.message);
   }
+
+  // Also clean up in-memory if present
+  webJawsStore.revokeSession(rawToken);
 }
 
 // Revoke all sessions belonging to a specific user (e.g. upon password reset or account deactivation)
@@ -61,6 +111,8 @@ export async function revokeAllUserSessions(userId: string): Promise<void> {
   } catch (err: any) {
     console.error('Error revoking all user sessions from PostgreSQL:', err.message);
   }
+
+  webJawsStore.revokeUserSessions(userId);
 }
 
 // Record login attempt in PostgreSQL login_attempts
@@ -74,6 +126,8 @@ export async function recordPostgresLoginAttempt(identifier: string, ip: string,
   } catch (err: any) {
     console.error('Error recording login attempt in PostgreSQL:', err.message);
   }
+
+  webJawsStore.recordLoginAttempt(identifier, ip, success);
 }
 
 // Check brute-force rate limit from PostgreSQL login_attempts (max 5 failed attempts in 15 mins)
@@ -100,9 +154,8 @@ export async function checkPostgresRateLimit(
     }
 
     return { limited: false };
-  } catch (err: any) {
-    console.error('Error checking rate limit in PostgreSQL:', err.message);
-    return { limited: false };
+  } catch {
+    return webJawsStore.isRateLimited(identifier, ip);
   }
 }
 
@@ -137,19 +190,24 @@ export async function addPostgresAuditLog(entry: {
   } catch (err: any) {
     console.error('Error saving audit log in PostgreSQL:', err.message);
   }
+
+  webJawsStore.addAuditLog(entry);
 }
 
-// PostgreSQL-authoritative authentication middleware
+// PostgreSQL-authoritative authentication middleware with constant-time token hash verification
 export async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   const token = extractSessionToken(req);
   if (!token) {
     return res.status(401).json({ success: false, error: 'Authentication required', code: 'AUTH_REQUIRED' });
   }
 
+  const tokenHash = hashSessionToken(token);
+
   try {
     const sessionRes = await query(
       `SELECT 
         s.id AS session_id,
+        s.token_hash,
         s.token,
         s.user_id,
         s.expires_at,
@@ -169,45 +227,43 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
         u.updated_at
        FROM auth_sessions s
        JOIN staff_users u ON s.user_id = u.id
-       WHERE s.token = $1`,
-      [token]
+       WHERE s.token_hash = $1 OR s.token = $2`,
+      [tokenHash, token]
     );
 
     if (sessionRes.rowCount === 0) {
-      res.clearCookie(SESSION_COOKIE_NAME, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-      });
+      res.clearCookie(SESSION_COOKIE_NAME, getSessionCookieOptions());
       return res.status(401).json({ success: false, error: 'Session invalid or expired', code: 'SESSION_EXPIRED' });
     }
 
     const row = sessionRes.rows[0];
 
+    // Constant-time hash verification if token_hash is stored
+    if (row.token_hash) {
+      const computedBuf = Buffer.from(tokenHash, 'hex');
+      const storedBuf = Buffer.from(row.token_hash, 'hex');
+      if (computedBuf.length !== storedBuf.length || !crypto.timingSafeEqual(computedBuf, storedBuf)) {
+        res.clearCookie(SESSION_COOKIE_NAME, getSessionCookieOptions());
+        return res.status(401).json({ success: false, error: 'Session verification failed', code: 'SESSION_EXPIRED' });
+      }
+    }
+
     // Check expiration
     if (new Date(row.expires_at).getTime() < Date.now()) {
       await revokePostgresSession(token);
-      res.clearCookie(SESSION_COOKIE_NAME, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-      });
+      res.clearCookie(SESSION_COOKIE_NAME, getSessionCookieOptions());
       return res.status(401).json({ success: false, error: 'Session expired', code: 'SESSION_EXPIRED' });
     }
 
     // Check active status
     if (!row.is_active) {
       await revokePostgresSession(token);
-      res.clearCookie(SESSION_COOKIE_NAME, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-      });
+      res.clearCookie(SESSION_COOKIE_NAME, getSessionCookieOptions());
       return res.status(403).json({ success: false, error: 'Account is inactive', code: 'ACCOUNT_INACTIVE' });
     }
 
     // Async update last_active_at without blocking the request
-    query('UPDATE auth_sessions SET last_active_at = NOW() WHERE token = $1', [token]).catch(() => {});
+    query('UPDATE auth_sessions SET last_active_at = NOW() WHERE token_hash = $1 OR token = $2', [tokenHash, token]).catch(() => {});
 
     const safeUser: StaffUser = {
       id: row.user_id,

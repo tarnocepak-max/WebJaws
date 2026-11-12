@@ -1,7 +1,7 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
 
-dotenv.config();
+dotenv.config({ override: true });
 const { Pool } = pg;
 
 export interface DBStatus {
@@ -16,7 +16,9 @@ export interface DBStatus {
 
 const databaseUrl = process.env.DATABASE_URL || '';
 let pool: pg.Pool | null = null;
-const hasPlaceholder = /your-db-password|your-supabase-ref|\[YOUR-PASSWORD\]|change-me/i.test(databaseUrl);
+const hasPlaceholder =
+  !databaseUrl ||
+  /(PROJECT_REF|DB_PASSWORD|@HOST[:/]|your-db-password|your-supabase-ref|\[YOUR-PASSWORD\]|change-me)/i.test(databaseUrl);
 
 const isLocal = /localhost|127\.0\.0\.1|host=\/tmp/i.test(databaseUrl);
 
@@ -26,12 +28,23 @@ if (databaseUrl.trim() && !hasPlaceholder) {
     try {
       const fs = await import('fs');
       const cp = await import('child_process');
-      if (fs.existsSync('/app/applet/data/postgres/PG_VERSION') || fs.existsSync('./data/postgres/PG_VERSION')) {
-        const pgData = fs.existsSync('/app/applet/data/postgres') ? '/app/applet/data/postgres' : './data/postgres';
-        try {
-          cp.execSync(`su -s /bin/bash appuser -c "/usr/lib/postgresql/15/bin/pg_ctl -D ${pgData} status >/dev/null 2>&1 || /usr/lib/postgresql/15/bin/pg_ctl -D ${pgData} -o '-k /tmp -p 5432' start >/dev/null 2>&1"`, { timeout: 4000 });
-        } catch {
-          // ignore error if already running or unprivileged
+      const possibleDirs = [
+        '/app/applet/data/pgdata',
+        './data/pgdata',
+        '/app/applet/data/postgres',
+        './data/postgres',
+      ];
+      for (const dir of possibleDirs) {
+        if (fs.existsSync(`${dir}/PG_VERSION`) && fs.existsSync(`${dir}/postgresql.conf`)) {
+          try {
+            cp.execSync(
+              `su -s /bin/bash appuser -c "/usr/lib/postgresql/15/bin/pg_ctl -D ${dir} status >/dev/null 2>&1 || /usr/lib/postgresql/15/bin/pg_ctl -D ${dir} -o '-k /tmp -p 5432' start >/dev/null 2>&1"`,
+              { timeout: 3000 }
+            );
+            break;
+          } catch {
+            // ignore
+          }
         }
       }
     } catch {
