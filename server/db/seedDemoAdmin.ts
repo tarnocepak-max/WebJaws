@@ -2,66 +2,60 @@ import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 import { pool, checkConnection } from './db.js';
 
-const explicitEnv = process.env.NODE_ENV;
 dotenv.config({ override: true });
 
-async function seedDemoAdmin() {
+export async function runSeedDemoAdmin(): Promise<{ success: boolean; message: string; userId?: string }> {
   console.log('[WebJaws Seed] Starting Demo Superadmin account provision...');
 
   // 1. Production Safety Check - Strictly forbidden in production
-  const env = (explicitEnv || process.env.NODE_ENV || 'development').trim().toLowerCase();
+  const env = (process.env.NODE_ENV || 'development').trim().toLowerCase();
   if (env === 'production') {
-    console.error('[WebJaws Seed] ERROR: Demo account seeding is strictly forbidden in PRODUCTION environment.');
-    process.exit(1);
+    const msg = 'ERROR: Demo account seeding is strictly forbidden in PRODUCTION environment.';
+    console.error(`[WebJaws Seed] ${msg}`);
+    return { success: false, message: msg };
   }
 
   // 2. Demo Password Validation via Environment Variable
   const demoPassword = process.env.DEMO_ADMIN_PASSWORD;
   if (!demoPassword || typeof demoPassword !== 'string' || !demoPassword.trim()) {
-    console.error('[WebJaws Seed] ERROR: Environment variable DEMO_ADMIN_PASSWORD is required.');
-    console.error('[WebJaws Seed] Usage: DEMO_ADMIN_PASSWORD=your_password npm run seed:demo');
-    process.exit(1);
+    const msg = 'ERROR: Environment variable DEMO_ADMIN_PASSWORD is required. Usage: DEMO_ADMIN_PASSWORD=your_password npm run seed:demo';
+    console.error(`[WebJaws Seed] ${msg}`);
+    return { success: false, message: msg };
   }
 
   // 3. Weak Password Protection Check
   const isWeak = demoPassword.length < 8 || /^(1234|admin|password|123456)$/i.test(demoPassword);
   if (isWeak && process.env.ALLOW_WEAK_DEMO_PASSWORD !== 'true') {
-    console.error('[WebJaws Seed] ERROR: DEMO_ADMIN_PASSWORD is weak (< 8 characters or trivial dictionary word).');
-    console.error('[WebJaws Seed] To proceed intentionally with a weak password, you must explicitly confirm ALLOW_WEAK_DEMO_PASSWORD=true.');
-    console.error('[WebJaws Seed] Example: ALLOW_WEAK_DEMO_PASSWORD=true DEMO_ADMIN_PASSWORD=1234 npm run seed:demo');
-    process.exit(1);
+    const msg = 'ERROR: DEMO_ADMIN_PASSWORD is weak (< 8 characters or trivial dictionary word). Must explicitly confirm ALLOW_WEAK_DEMO_PASSWORD=true.';
+    console.error(`[WebJaws Seed] ${msg}`);
+    return { success: false, message: msg };
   }
 
   // 4. Database Connection Check
   const dbStatus = await checkConnection();
   if (!dbStatus.connected || !pool) {
-    console.error(`[WebJaws Seed] ERROR: PostgreSQL is unavailable: ${dbStatus.error || 'Pool not initialized'}`);
-    process.exit(1);
+    const msg = `ERROR: PostgreSQL is unavailable: ${dbStatus.error || 'Pool not initialized'}`;
+    console.error(`[WebJaws Seed] ${msg}`);
+    return { success: false, message: msg };
   }
 
-  const client = await pool.connect();
-
+  let client;
   try {
+    client = await pool.connect();
     await client.query('BEGIN');
 
     // 5. Ensure role 'Superadmin' exists in roles table
-    const roleCheck = await client.query(
-      "SELECT id FROM roles WHERE id = 'Superadmin' LIMIT 1"
+    await client.query(
+      `INSERT INTO roles (id, name, description, is_system)
+       VALUES ('Superadmin', 'Superadmin', 'Administrator utama WebJaws', TRUE)
+       ON CONFLICT (id) DO NOTHING`
     );
-    if (roleCheck.rowCount === 0) {
-      await client.query(
-        `INSERT INTO roles (id, name, description, is_system)
-         VALUES ('Superadmin', 'Superadmin', 'Administrator utama WebJaws', TRUE)
-         ON CONFLICT (id) DO NOTHING`
-      );
-      console.log("[WebJaws Seed] Initialized 'Superadmin' role in roles table.");
-    }
 
     const DEMO_USERNAME = 'admin';
     const DEMO_EMAIL = 'adminjaws@mora.jaws';
     const DEMO_FULLNAME = 'WebJaws Demo Admin';
 
-    // 6. Duplicate Check - Do not overwrite existing accounts
+    // 6. Duplicate Check - Reject duplicate and never overwrite existing accounts
     const existingCheck = await client.query(
       `SELECT id, username, email FROM staff_users 
        WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($2) 
@@ -71,9 +65,10 @@ async function seedDemoAdmin() {
 
     if (existingCheck.rowCount && existingCheck.rowCount > 0) {
       const existing = existingCheck.rows[0];
-      console.log(`[WebJaws Seed] Notice: Account with username '${existing.username}' or email '${existing.email}' already exists. Skipping insertion to prevent overwriting.`);
+      const msg = `Notice: Account with username '${existing.username}' or email '${existing.email}' already exists. Skipping insertion to prevent overwriting.`;
+      console.log(`[WebJaws Seed] ${msg}`);
       await client.query('COMMIT');
-      process.exit(0);
+      return { success: true, message: msg, userId: existing.id };
     }
 
     // 7. Hash password with bcrypt cost 10 (never log plaintext or hash)
@@ -91,7 +86,7 @@ async function seedDemoAdmin() {
 
     const createdUser = insertRes.rows[0];
 
-    // 9. Audit log entry
+    // 9. Audit log entry (sanitized, no secrets)
     await client.query(
       `INSERT INTO audit_logs (
         user_id, user_name, role, activity, module, record_id, ip_address, created_at
@@ -107,14 +102,40 @@ async function seedDemoAdmin() {
     console.log(`[WebJaws Seed] Email     : ${createdUser.email}`);
     console.log(`[WebJaws Seed] Role      : ${createdUser.role}`);
     console.log(`[WebJaws Seed] Status    : ${createdUser.is_active ? 'Active' : 'Inactive'}`);
+
+    return {
+      success: true,
+      message: 'Demo Superadmin provisioned successfully',
+      userId: createdUser.id,
+    };
   } catch (error: any) {
-    await client.query('ROLLBACK');
-    console.error(`[WebJaws Seed] ERROR during transaction: ${error.message}`);
-    process.exit(1);
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    const msg = `ERROR during transaction: ${error.message}`;
+    console.error(`[WebJaws Seed] ${msg}`);
+    return { success: false, message: msg };
   } finally {
-    client.release();
-    process.exit(0);
+    if (client) client.release();
   }
 }
 
-seedDemoAdmin();
+// When executed directly from CLI: npm run seed:demo
+async function main() {
+  let exitCode = 0;
+  try {
+    const result = await runSeedDemoAdmin();
+    if (!result.success) {
+      exitCode = 1;
+    }
+  } catch (err: any) {
+    console.error('[WebJaws Seed] Unexpected fatal error:', err.message);
+    exitCode = 1;
+  } finally {
+    if (pool) {
+      await pool.end().catch(() => {});
+    }
+    process.exitCode = exitCode;
+  }
+}
+
+// Run if this script is executed directly
+main();

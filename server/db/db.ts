@@ -1,3 +1,5 @@
+import fs from 'fs';
+import cp from 'child_process';
 import pg from 'pg';
 import dotenv from 'dotenv';
 
@@ -26,8 +28,6 @@ if (databaseUrl.trim() && !hasPlaceholder) {
   // If local PostgreSQL is targeted and data directory exists, ensure the local cluster is running
   if (isLocal) {
     try {
-      const fs = await import('fs');
-      const cp = await import('child_process');
       const possibleDirs = [
         '/app/applet/data/pgdata',
         './data/pgdata',
@@ -100,6 +100,13 @@ export async function checkConnection(): Promise<DBStatus> {
 export async function query<T extends pg.QueryResultRow = any>(sql: string, params?: any[]): Promise<pg.QueryResult<T>> {
   if (!pool) throw new Error('PostgreSQL is unavailable. Configure DATABASE_URL before using persistent features.');
   return pool.query<T>(sql, params);
+}
+
+export async function closePool(): Promise<void> {
+  if (pool) {
+    await pool.end();
+    pool = null;
+  }
 }
 
 export { pool };

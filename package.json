@@ -12,7 +12,9 @@
     "lint": "tsc --noEmit",
     "migrate": "tsx -e \"import('./server/db/migrate.js').then(m => m.runMigrations()).then(r => { console.log(JSON.stringify(r, null, 2)); process.exit(r.success ? 0 : 1); }).catch(e => { console.error(e); process.exit(1); })\"",
     "seed:demo": "tsx server/db/seedDemoAdmin.ts",
-    "remove:demo": "tsx server/db/removeDemoAdmin.ts"
+    "remove:demo": "tsx server/db/removeDemoAdmin.ts",
+    "test:auth": "tsx scripts/testAuthVerification.ts",
+    "test:unit": "tsx scripts/tests/unitAuth.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

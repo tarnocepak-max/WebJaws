@@ -16,11 +16,12 @@ import {
   addPostgresAuditLog,
   hashSessionToken,
   getSessionCookieOptions,
+  getClearCookieOptions,
 } from '../auth/auth.js';
 
 export const authRouter = Router();
 
-// POST /api/auth/login - Authenticate with PostgreSQL staff_users & issue PostgreSQL auth_session
+// POST /api/auth/login - Authenticate strictly with PostgreSQL staff_users & issue PostgreSQL auth_session
 authRouter.post('/login', async (req, res) => {
   const { identifier, password } = req.body || {};
   const ip = getClientIp(req);
@@ -35,19 +36,28 @@ authRouter.post('/login', async (req, res) => {
 
   const cleanIdentifier = identifier.trim().toLowerCase();
 
-  // Rate Limiting check against PostgreSQL login_attempts
-  const rateLimitStatus = await checkPostgresRateLimit(cleanIdentifier, ip);
-  if (rateLimitStatus.limited) {
-    return res.status(429).json({
+  // Rate Limiting check against PostgreSQL login_attempts (fail closed if DB is unavailable)
+  try {
+    const rateLimitStatus = await checkPostgresRateLimit(cleanIdentifier, ip);
+    if (rateLimitStatus.limited) {
+      return res.status(429).json({
+        success: false,
+        error: `Too many failed login attempts. Account temporarily locked for security. Please try again in ${rateLimitStatus.retryAfterSeconds} seconds.`,
+        retryAfterSeconds: rateLimitStatus.retryAfterSeconds,
+        code: 'RATE_LIMITED',
+      });
+    }
+  } catch (err: any) {
+    console.error('Rate limit error:', err.message);
+    return res.status(503).json({
       success: false,
-      error: `Too many failed login attempts. Account temporarily locked for security. Please try again in ${rateLimitStatus.retryAfterSeconds} seconds.`,
-      retryAfterSeconds: rateLimitStatus.retryAfterSeconds,
-      code: 'RATE_LIMITED',
+      error: 'Authentication service temporarily unavailable',
+      code: 'DATABASE_UNAVAILABLE',
     });
   }
 
   try {
-    // Find staff user by username or email (case-insensitive) in PostgreSQL
+    // Find staff user by username or email in PostgreSQL
     const userRes = await query(
       `SELECT 
         id, username, email, password_hash, full_name, role, contractor_name, area, phone, avatar_url,
@@ -59,7 +69,7 @@ authRouter.post('/login', async (req, res) => {
     );
 
     if (userRes.rowCount === 0) {
-      await recordPostgresLoginAttempt(cleanIdentifier, ip, false);
+      await recordPostgresLoginAttempt(cleanIdentifier, ip, false).catch(() => {});
       return res.status(401).json({
         success: false,
         error: 'Invalid username/email or password',
@@ -71,7 +81,7 @@ authRouter.post('/login', async (req, res) => {
 
     // Check account active status
     if (!user.is_active) {
-      await recordPostgresLoginAttempt(cleanIdentifier, ip, false);
+      await recordPostgresLoginAttempt(cleanIdentifier, ip, false).catch(() => {});
       return res.status(403).json({
         success: false,
         error: 'This account has been disabled. Please contact the Superadmin.',
@@ -82,7 +92,7 @@ authRouter.post('/login', async (req, res) => {
     // Verify bcrypt password hash
     const isPasswordValid = await bcrypt.compare(password, user.password_hash);
     if (!isPasswordValid) {
-      await recordPostgresLoginAttempt(cleanIdentifier, ip, false);
+      await recordPostgresLoginAttempt(cleanIdentifier, ip, false).catch(() => {});
       return res.status(401).json({
         success: false,
         error: 'Invalid username/email or password',
@@ -91,7 +101,7 @@ authRouter.post('/login', async (req, res) => {
     }
 
     // Record successful login attempt
-    await recordPostgresLoginAttempt(cleanIdentifier, ip, true);
+    await recordPostgresLoginAttempt(cleanIdentifier, ip, true).catch(() => {});
 
     // Update last_login_at and updated_at in PostgreSQL
     await query(
@@ -101,7 +111,7 @@ authRouter.post('/login', async (req, res) => {
       [user.id]
     );
 
-    // Create session in PostgreSQL auth_sessions
+    // Create session in PostgreSQL auth_sessions (strictly token_hash)
     const durationHours = Number(process.env.SESSION_DURATION_HOURS || 24);
     const safeDurationHours = Number.isFinite(durationHours) && durationHours >= 1 && durationHours <= 720 ? durationHours : 24;
     const session = await createPostgresSession(user.id, ip, userAgent, safeDurationHours);
@@ -118,7 +128,7 @@ authRouter.post('/login', async (req, res) => {
       module: 'Authentication',
       ip_address: ip,
       user_agent: userAgent,
-    });
+    }).catch((err) => console.error('Failed to write login audit log:', err.message));
 
     // Strip password_hash before returning to client
     const { password_hash, ...safeUser } = user;
@@ -130,9 +140,10 @@ authRouter.post('/login', async (req, res) => {
     });
   } catch (error: any) {
     console.error('Login error:', error.message);
-    return res.status(500).json({
+    return res.status(503).json({
       success: false,
-      error: 'Authentication failed due to internal server error',
+      error: 'Authentication service temporarily unavailable',
+      code: 'DATABASE_UNAVAILABLE',
     });
   }
 });
@@ -150,8 +161,8 @@ authRouter.post('/logout', async (req: AuthenticatedRequest, res: Response) => {
         `SELECT s.user_id, u.full_name, u.role
          FROM auth_sessions s
          LEFT JOIN staff_users u ON s.user_id = u.id
-         WHERE s.token_hash = $1 OR s.token = $2`,
-        [tokenHash, token]
+         WHERE s.token_hash = $1`,
+        [tokenHash]
       );
       if (sessionRes.rowCount && sessionRes.rows[0]) {
         const row = sessionRes.rows[0];
@@ -163,15 +174,21 @@ authRouter.post('/logout', async (req: AuthenticatedRequest, res: Response) => {
           module: 'Authentication',
           ip_address: ip,
           user_agent: (req.headers['user-agent'] as string) || undefined,
-        });
+        }).catch(() => {});
       }
       await revokePostgresSession(token);
     } catch (err: any) {
       console.error('Logout error:', err.message);
+      res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions());
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to revoke session from database',
+        code: 'LOGOUT_FAILED',
+      });
     }
   }
 
-  res.clearCookie(SESSION_COOKIE_NAME, getSessionCookieOptions());
+  res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions());
 
   return res.json({
     success: true,
@@ -179,7 +196,7 @@ authRouter.post('/logout', async (req: AuthenticatedRequest, res: Response) => {
   });
 });
 
-// POST /api/auth/logout-all - Revoke all active sessions for current user
+// POST /api/auth/logout-all - Revoke all active sessions for current user in PostgreSQL
 authRouter.post('/logout-all', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   const user = req.user!;
   const ip = getClientIp(req);
@@ -194,12 +211,18 @@ authRouter.post('/logout-all', requireAuth, async (req: AuthenticatedRequest, re
       module: 'Authentication',
       ip_address: ip,
       user_agent: (req.headers['user-agent'] as string) || undefined,
-    });
+    }).catch(() => {});
   } catch (err: any) {
     console.error('Logout-all error:', err.message);
+    res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions());
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to revoke all sessions from database',
+      code: 'LOGOUT_ALL_FAILED',
+    });
   }
 
-  res.clearCookie(SESSION_COOKIE_NAME, getSessionCookieOptions());
+  res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions());
 
   return res.json({
     success: true,
@@ -222,9 +245,11 @@ authRouter.get('/me', requireAuth, (req: AuthenticatedRequest, res: Response) =>
   });
 });
 
-// POST /api/auth/change-password - Change user password with PostgreSQL persistence
+// POST /api/auth/change-password - Change user password with PostgreSQL persistence and session revocation
 authRouter.post('/change-password', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   const { currentPassword, newPassword } = req.body || {};
+  const ip = getClientIp(req);
+  const userAgent = (req.headers['user-agent'] as string) || 'Unknown Browser';
 
   if (!currentPassword || !newPassword) {
     return res.status(400).json({ success: false, error: 'Current and new password are required' });
@@ -254,14 +279,21 @@ authRouter.post('/change-password', requireAuth, async (req: AuthenticatedReques
 
     await query('UPDATE staff_users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [newHash, user.id]);
 
+    // Consistent session revocation policy: Revoke all existing sessions and issue a fresh one
+    await revokeAllUserSessions(user.id);
+    const durationHours = Number(process.env.SESSION_DURATION_HOURS || 24);
+    const safeDurationHours = Number.isFinite(durationHours) && durationHours >= 1 && durationHours <= 720 ? durationHours : 24;
+    const freshSession = await createPostgresSession(user.id, ip, userAgent, safeDurationHours);
+    res.cookie(SESSION_COOKIE_NAME, freshSession.token, getSessionCookieOptions(safeDurationHours));
+
     await addPostgresAuditLog({
       user_id: user.id,
       user_name: user.full_name,
       role: user.role,
       activity: 'CHANGE_PASSWORD',
       module: 'Authentication',
-      ip_address: getClientIp(req),
-      user_agent: (req.headers['user-agent'] as string) || undefined,
+      ip_address: ip,
+      user_agent: userAgent,
     });
 
     return res.json({
