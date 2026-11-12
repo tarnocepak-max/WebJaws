@@ -30,6 +30,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { Badge } from '../common/Badge';
+import { FeatureMenuStatus } from './FeatureMenuStatus';
 
 interface MobileMenuDrawerProps {
   isOpen: boolean;
@@ -148,7 +149,8 @@ export const MobileMenuDrawer: React.FC<MobileMenuDrawerProps> = ({
                   }`}
                 >
                   <Icon className="w-4 h-4" />
-                  <span>{item.label}</span>
+                  <span className="min-w-0 flex-1 text-left">{item.label}</span>
+                  <FeatureMenuStatus path={item.path} compact />
                 </button>
               );
             })}
@@ -200,7 +202,8 @@ export const MobileMenuDrawer: React.FC<MobileMenuDrawerProps> = ({
                               }`}
                             >
                               <ItemIcon className="w-3.5 h-3.5" />
-                              <span className="truncate">{item.label}</span>
+                              <span className="truncate flex-1">{item.label}</span>
+                              <FeatureMenuStatus path={item.path} compact />
                             </button>
                           );
                         })}

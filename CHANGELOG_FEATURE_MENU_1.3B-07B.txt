@@ -1,0 +1,11 @@
+WEBJAWS PHASE 1.3B-07B — MENU FEATURE STATUS
+
+- Added compact lock/pending/verified/offline status icon beside every configured menu item.
+- Desktop sidebar: standalone menus and category submenu entries updated.
+- Collapsed desktop sidebar: status remains visible and tooltip includes status text.
+- Mobile drawer: standalone menus and category submenu entries updated.
+- Mobile bottom navigation: Dashboard, Contact Center and Report WO now show status icons.
+- Added shared status resolver in FeatureMenuStatus.tsx.
+- No login, cookie/session, backend authorization, database schema, migration, or RLS changes.
+- Status indicators are informational and do not block navigation.
+- Build not verified; run npm ci && npm run build before deployment.

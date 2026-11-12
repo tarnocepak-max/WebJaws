@@ -1,5 +1,6 @@
 import React from 'react';
 import { LayoutDashboard, Headphones, FileSpreadsheet, Menu } from 'lucide-react';
+import { FeatureMenuStatus } from './FeatureMenuStatus';
 
 interface BottomNavProps {
   currentPath: string;
@@ -33,7 +34,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
             }`}
           >
             <Icon className={`w-5 h-5 mb-0.5 ${isActive ? 'stroke-[2.5]' : ''}`} />
-            <span className="text-[10px] tracking-tight truncate">{item.label}</span>
+            <span className="flex items-center gap-0.5 text-[10px] tracking-tight truncate">{item.label}<FeatureMenuStatus path={item.path} compact /></span>
           </button>
         );
       })}

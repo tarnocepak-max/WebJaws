@@ -1,0 +1,26 @@
+WEBJAWS PHASE 1.3B-07 — CHANGE SUMMARY
+
+NEW
+- Global Feature Status indicator in the topbar.
+- Dropdown showing readiness of Database, Custom Authentication, Work Orders persistence, RBAC, and RLS.
+- Live database connection check using existing /api/system/health endpoint.
+- Manual refresh and automatic refresh every 60 seconds.
+
+CHANGED
+- src/components/layout/Topbar.tsx: imports and displays FeatureLockIndicator.
+
+ADDED
+- src/components/layout/FeatureLockIndicator.tsx
+- PATCH_NOTES_1.3B-07.md
+- CHANGELOG_FEATURE_LOCK_1.3B-07.txt
+
+NOT CHANGED
+- Login and logout flow.
+- HttpOnly session cookies or token hashing.
+- Backend authentication/authorization middleware.
+- Database schema, data, migrations, or connection pool.
+- Existing application feature behavior.
+- No RLS policies were created or enabled.
+
+IMPORTANT
+The UI reports readiness conservatively. A green database status means the health endpoint could connect to PostgreSQL; it does not prove all database-backed features are fully synchronized. The overall feature indicator remains LOCKED while known incomplete or unverified items remain.

@@ -30,6 +30,9 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { Badge } from '../common/Badge';
+import { FeatureMenuStatus, getMenuFeatureState } from './FeatureMenuStatus';
+
+const getMenuStatusTitle = (path: string) => ({ locked: 'LOCKED', pending: 'PENDING', verified: 'VERIFIED', offline: 'OFFLINE' }[getMenuFeatureState(path)]);
 
 interface SidebarProps {
   currentPath: string;
@@ -153,7 +156,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <button
                 key={item.id}
                 onClick={() => onNavigate(item.path)}
-                title={isCollapsed ? item.label : undefined}
+                title={isCollapsed ? `${item.label} · ${getMenuStatusTitle(item.path)}` : undefined}
                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-150 cursor-pointer ${
                   isSelected
                     ? 'bg-sky-600 text-white shadow-md shadow-sky-600/30'
@@ -161,9 +164,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 } ${isCollapsed ? 'justify-center' : ''}`}
               >
                 <Icon className={`w-4 h-4 shrink-0 ${isSelected ? 'text-white' : 'text-slate-400'}`} />
-                {!isCollapsed && (
-                  <span className="truncate flex-1 text-left">{item.label}</span>
-                )}
+                {!isCollapsed && <span className="truncate flex-1 text-left">{item.label}</span>}
+                <FeatureMenuStatus path={item.path} compact />
               </button>
             );
           })}
@@ -226,7 +228,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           <button
                             key={item.id}
                             onClick={() => onNavigate(item.path)}
-                            title={isCollapsed ? item.label : undefined}
+                            title={isCollapsed ? `${item.label} · ${getMenuStatusTitle(item.path)}` : undefined}
                             className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium transition cursor-pointer ${
                               isSelected
                                 ? 'bg-sky-500/20 text-sky-300 font-semibold border border-sky-500/30'
@@ -235,6 +237,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           >
                             <ItemIcon className={`w-3.5 h-3.5 shrink-0 ${isSelected ? 'text-sky-400' : 'text-slate-400'}`} />
                             {!isCollapsed && <span className="truncate text-left flex-1">{item.label}</span>}
+                            <FeatureMenuStatus path={item.path} compact />
                           </button>
                         );
                       })}

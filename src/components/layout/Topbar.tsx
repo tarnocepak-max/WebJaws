@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { Badge } from '../common/Badge';
+import { FeatureLockIndicator } from './FeatureLockIndicator';
 
 interface TopbarProps {
   onNavigate: (path: string) => void;
@@ -61,6 +62,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onNavigate }) => {
 
       {/* Right Actions: Database Status, Role Switcher, Profile, Logout */}
       <div className="flex items-center gap-2 sm:gap-3">
+        <FeatureLockIndicator />
         {/* Supabase DB Status Indicator */}
         <button
           onClick={() => onNavigate('/setup/database-application')}
