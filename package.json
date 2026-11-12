@@ -18,7 +18,9 @@
     "seed:demo": "tsx server/db/seedDemoAdmin.ts",
     "remove:demo": "tsx server/db/removeDemoAdmin.ts",
     "test:auth": "tsx scripts/testAuthVerification.ts",
-    "test:unit": "tsx scripts/tests/unitAuth.test.ts"
+    "test:unit": "tsx scripts/tests/unitAuth.test.ts",
+    "test:users": "tsx scripts/testUserManagement.ts",
+    "test:unit:users": "tsx scripts/tests/unitUserManagement.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

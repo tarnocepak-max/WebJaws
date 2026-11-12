@@ -1,4 +1,5 @@
 // server.ts
+import fs3 from "fs";
 import express from "express";
 import cookieParser from "cookie-parser";
 import dotenv2 from "dotenv";
@@ -908,14 +909,14 @@ function extractSessionToken(req) {
   return typeof token === "string" && token.length > 0 ? token : null;
 }
 async function createPostgresSession(userId, ip, userAgent, durationHours = 24) {
-  const rawToken = crypto2.randomBytes(48).toString("hex");
-  const tokenHash = hashSessionToken(rawToken);
   const safeDuration = Number.isFinite(durationHours) && durationHours >= 1 && durationHours <= 720 ? durationHours : 24;
-  const expiresAt = new Date(Date.now() + safeDuration * 3600 * 1e3);
   const dbStatus = await checkConnection();
   if (!dbStatus.connected) {
-    throw new Error(`Database unavailable for session creation: ${dbStatus.error || "Connection failed"}`);
+    throw new Error("Database is unavailable. Cannot create session without PostgreSQL connection.");
   }
+  const rawToken = crypto2.randomBytes(48).toString("hex");
+  const tokenHash = hashSessionToken(rawToken);
+  const expiresAt = new Date(Date.now() + safeDuration * 3600 * 1e3);
   const res = await query(
     `INSERT INTO auth_sessions (token_hash, user_id, ip_address, user_agent, expires_at, last_active_at, created_at)
      VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
@@ -937,23 +938,33 @@ async function createPostgresSession(userId, ip, userAgent, durationHours = 24) 
 }
 async function revokePostgresSession(rawToken) {
   if (!rawToken) return;
+  const dbStatus = await checkConnection();
+  if (!dbStatus.connected) return;
   const tokenHash = hashSessionToken(rawToken);
   await query("DELETE FROM auth_sessions WHERE token_hash = $1", [tokenHash]);
 }
 async function revokeAllUserSessions(userId) {
   if (!userId) return;
+  const dbStatus = await checkConnection();
+  if (!dbStatus.connected) return;
   await query("DELETE FROM auth_sessions WHERE user_id = $1", [userId]);
 }
 async function recordPostgresLoginAttempt(identifier, ip, success) {
   const cleanIdentifier = identifier.toLowerCase().trim();
+  const dbStatus = await checkConnection();
+  if (!dbStatus.connected) return;
   await query(
     `INSERT INTO login_attempts (identifier, ip_address, success, attempt_time)
      VALUES ($1, $2, $3, NOW())`,
     [cleanIdentifier, ip, success]
   );
 }
-async function checkPostgresRateLimit(identifier, _ip) {
+async function checkPostgresRateLimit(identifier, ip) {
   const cleanIdentifier = identifier.toLowerCase().trim();
+  const dbStatus = await checkConnection();
+  if (!dbStatus.connected) {
+    return { limited: false };
+  }
   const res = await query(
     `SELECT COUNT(*)::int AS failed_count, MIN(attempt_time) AS oldest_attempt
      FROM login_attempts
@@ -988,6 +999,10 @@ function sanitizeAuditData(data) {
   return sanitized;
 }
 async function addPostgresAuditLog(entry) {
+  const dbStatus = await checkConnection();
+  if (!dbStatus.connected) {
+    return;
+  }
   const sanitizedDiff = entry.diff_data ? JSON.stringify(sanitizeAuditData(entry.diff_data)) : null;
   await query(
     `INSERT INTO audit_logs (user_id, user_name, role, activity, module, record_id, diff_data, ip_address, user_agent, created_at)
@@ -1009,6 +1024,14 @@ async function requireAuth(req, res, next) {
   const token = extractSessionToken(req);
   if (!token) {
     return res.status(401).json({ success: false, error: "Authentication required", code: "AUTH_REQUIRED" });
+  }
+  const dbStatus = await checkConnection();
+  if (!dbStatus.connected) {
+    return res.status(503).json({
+      success: false,
+      error: "Authentication service temporarily unavailable",
+      code: "DATABASE_UNAVAILABLE"
+    });
   }
   const tokenHash = hashSessionToken(token);
   try {
@@ -1114,6 +1137,14 @@ authRouter.post("/login", async (req, res) => {
     });
   }
   const cleanIdentifier = identifier.trim().toLowerCase();
+  const dbStatus = await checkConnection();
+  if (!dbStatus.connected) {
+    return res.status(503).json({
+      success: false,
+      error: "Authentication service temporarily unavailable",
+      code: "DATABASE_UNAVAILABLE"
+    });
+  }
   try {
     const rateLimitStatus = await checkPostgresRateLimit(cleanIdentifier, ip);
     if (rateLimitStatus.limited) {
@@ -1344,7 +1375,43 @@ import { Router as Router2 } from "express";
 import bcrypt3 from "bcryptjs";
 var userRouter = Router2();
 userRouter.use(requireAuth);
+var VALID_ROLES = [
+  "Superadmin",
+  "Agent Dispatch",
+  "Leader",
+  "Installer",
+  "Monitoring Data",
+  "IT Support Application"
+];
+async function ensureDbConnected(res) {
+  const dbStatus = await checkConnection();
+  if (!dbStatus.connected) {
+    res.status(503).json({
+      success: false,
+      error: "Database is unavailable. User management requires a live PostgreSQL connection.",
+      code: "DATABASE_UNAVAILABLE"
+    });
+    return false;
+  }
+  return true;
+}
+userRouter.get("/roles", requireRole(["Superadmin", "IT Support Application"]), async (_req, res) => {
+  if (!await ensureDbConnected(res)) return;
+  try {
+    const result = await query(
+      "SELECT id, name, description, is_system FROM roles ORDER BY id ASC"
+    );
+    return res.json({
+      success: true,
+      roles: result.rows
+    });
+  } catch (err) {
+    console.error("List roles error:", err.message);
+    return res.status(500).json({ success: false, error: "Failed to retrieve roles" });
+  }
+});
 userRouter.get("/", requireRole(["Superadmin", "IT Support Application"]), async (req, res) => {
+  if (!await ensureDbConnected(res)) return;
   const { role, is_active, search } = req.query;
   try {
     let sql = `
@@ -1354,23 +1421,25 @@ userRouter.get("/", requireRole(["Superadmin", "IT Support Application"]), async
       WHERE 1=1
     `;
     const params = [];
-    if (role && typeof role === "string") {
-      params.push(role);
+    if (role && typeof role === "string" && role.trim()) {
+      params.push(role.trim());
       sql += ` AND role = $${params.length}`;
     }
     if (is_active !== void 0) {
-      const activeBool = is_active === "true";
+      const activeBool = is_active === "true" || is_active === "1";
       params.push(activeBool);
       sql += ` AND is_active = $${params.length}`;
     }
     if (search && typeof search === "string" && search.trim()) {
-      params.push(`%${search.trim().toLowerCase()}%`);
+      const term = `%${search.trim().toLowerCase()}%`;
+      params.push(term);
       sql += ` AND (
         LOWER(username) LIKE $${params.length} OR
         LOWER(full_name) LIKE $${params.length} OR
         LOWER(email) LIKE $${params.length} OR
         LOWER(COALESCE(contractor_name, '')) LIKE $${params.length} OR
-        LOWER(COALESCE(area, '')) LIKE $${params.length}
+        LOWER(COALESCE(area, '')) LIKE $${params.length} OR
+        LOWER(COALESCE(phone, '')) LIKE $${params.length}
       )`;
     }
     sql += " ORDER BY created_at DESC";
@@ -1379,14 +1448,13 @@ userRouter.get("/", requireRole(["Superadmin", "IT Support Application"]), async
       id: row.id,
       username: row.username,
       email: row.email,
-      password_hash: "",
       full_name: row.full_name,
       role: row.role,
       contractor_name: row.contractor_name || void 0,
       area: row.area || void 0,
       phone: row.phone || void 0,
       avatar_url: row.avatar_url || void 0,
-      is_active: row.is_active,
+      is_active: Boolean(row.is_active),
       last_login_at: row.last_login_at ? new Date(row.last_login_at).toISOString() : void 0,
       created_at: new Date(row.created_at).toISOString(),
       updated_at: new Date(row.updated_at).toISOString()
@@ -1401,7 +1469,47 @@ userRouter.get("/", requireRole(["Superadmin", "IT Support Application"]), async
     return res.status(500).json({ success: false, error: "Failed to retrieve staff users" });
   }
 });
+userRouter.get("/:id", requireRole(["Superadmin", "IT Support Application"]), async (req, res) => {
+  if (!await ensureDbConnected(res)) return;
+  const { id } = req.params;
+  try {
+    const result = await query(
+      `SELECT id, username, email, full_name, role, contractor_name, area, phone, avatar_url,
+              is_active, last_login_at, created_at, updated_at
+       FROM staff_users
+       WHERE id = $1`,
+      [id]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: "Staff user not found" });
+    }
+    const row = result.rows[0];
+    const safeUser = {
+      id: row.id,
+      username: row.username,
+      email: row.email,
+      full_name: row.full_name,
+      role: row.role,
+      contractor_name: row.contractor_name || void 0,
+      area: row.area || void 0,
+      phone: row.phone || void 0,
+      avatar_url: row.avatar_url || void 0,
+      is_active: Boolean(row.is_active),
+      last_login_at: row.last_login_at ? new Date(row.last_login_at).toISOString() : void 0,
+      created_at: new Date(row.created_at).toISOString(),
+      updated_at: new Date(row.updated_at).toISOString()
+    };
+    return res.json({
+      success: true,
+      user: safeUser
+    });
+  } catch (err) {
+    console.error("Get user details error:", err.message);
+    return res.status(500).json({ success: false, error: "Failed to retrieve staff user details" });
+  }
+});
 userRouter.post("/", requireRole(["Superadmin"]), async (req, res) => {
+  if (!await ensureDbConnected(res)) return;
   const { username, email, password, full_name, role, contractor_name, area, phone } = req.body || {};
   if (!username || !email || !password || !full_name || !role) {
     return res.status(400).json({
@@ -1409,22 +1517,48 @@ userRouter.post("/", requireRole(["Superadmin"]), async (req, res) => {
       error: "Fields username, email, password, full_name, and role are required"
     });
   }
-  const validRoles = [
-    "Superadmin",
-    "Agent Dispatch",
-    "Leader",
-    "Installer",
-    "Monitoring Data",
-    "IT Support Application"
-  ];
-  if (!validRoles.includes(role)) {
-    return res.status(400).json({
-      success: false,
-      error: `Invalid role '${role}'. Must be one of: ${validRoles.join(", ")}`
-    });
-  }
   const cleanUsername = String(username).trim().toLowerCase();
   const cleanEmail = String(email).trim().toLowerCase();
+  const cleanFullName = String(full_name).trim();
+  const cleanRole = String(role).trim();
+  if (cleanUsername.length < 3 || cleanUsername.length > 64 || !/^[a-zA-Z0-9._-]+$/.test(cleanUsername)) {
+    return res.status(400).json({
+      success: false,
+      error: "Username must be 3\u201364 characters and contain only letters, numbers, dots, dashes, or underscores"
+    });
+  }
+  if (cleanEmail.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    return res.status(400).json({
+      success: false,
+      error: "Please enter a valid email address"
+    });
+  }
+  if (cleanFullName.length < 2 || cleanFullName.length > 128) {
+    return res.status(400).json({
+      success: false,
+      error: "Full name must be 2\u2013128 characters"
+    });
+  }
+  if (typeof password !== "string" || password.length < 8) {
+    return res.status(400).json({
+      success: false,
+      error: "Password must be at least 8 characters long"
+    });
+  }
+  const roleCheck = await query("SELECT id FROM roles WHERE id = $1", [cleanRole]);
+  if (roleCheck.rowCount === 0) {
+    return res.status(400).json({
+      success: false,
+      error: `Invalid role '${cleanRole}'. Must be a registered role in the system.`
+    });
+  }
+  if (req.user.role !== "Superadmin" && cleanRole === "Superadmin") {
+    return res.status(403).json({
+      success: false,
+      error: "Only Superadmin can assign the Superadmin role",
+      code: "INSUFFICIENT_PERMISSIONS"
+    });
+  }
   try {
     const existing = await query(
       "SELECT id FROM staff_users WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($2) LIMIT 1",
@@ -1442,13 +1576,13 @@ userRouter.post("/", requireRole(["Superadmin"]), async (req, res) => {
       `INSERT INTO staff_users (
         username, email, password_hash, full_name, role, contractor_name, area, phone, is_active, created_at, updated_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, NOW(), NOW())
-      RETURNING id, username, email, full_name, role, contractor_name, area, phone, is_active, created_at, updated_at`,
+      RETURNING id, username, email, full_name, role, contractor_name, area, phone, avatar_url, is_active, created_at, updated_at`,
       [
         cleanUsername,
         cleanEmail,
         passwordHash,
-        String(full_name).trim(),
-        role,
+        cleanFullName,
+        cleanRole,
         contractor_name ? String(contractor_name).trim() : null,
         area ? String(area).trim() : null,
         phone ? String(phone).trim() : null
@@ -1462,68 +1596,170 @@ userRouter.post("/", requireRole(["Superadmin"]), async (req, res) => {
       activity: "CREATE_STAFF_USER",
       module: "Management User",
       record_id: newUser.id,
-      diff_data: { username: newUser.username, role: newUser.role, contractor: newUser.contractor_name, area: newUser.area },
+      diff_data: {
+        username: newUser.username,
+        email: newUser.email,
+        role: newUser.role,
+        contractor: newUser.contractor_name,
+        area: newUser.area,
+        phone: newUser.phone
+      },
       ip_address: getClientIp(req),
       user_agent: req.headers["user-agent"] || void 0
     });
     return res.status(201).json({
       success: true,
       message: `Staff user '${newUser.username}' created successfully`,
-      user: newUser
+      user: {
+        id: newUser.id,
+        username: newUser.username,
+        email: newUser.email,
+        full_name: newUser.full_name,
+        role: newUser.role,
+        contractor_name: newUser.contractor_name || void 0,
+        area: newUser.area || void 0,
+        phone: newUser.phone || void 0,
+        is_active: newUser.is_active,
+        created_at: new Date(newUser.created_at).toISOString(),
+        updated_at: new Date(newUser.updated_at).toISOString()
+      }
     });
   } catch (err) {
+    if (err?.code === "23505") {
+      return res.status(409).json({ success: false, error: "Username or email already exists" });
+    }
     console.error("Create user error:", err.message);
-    return res.status(500).json({ success: false, error: "Failed to create staff user" });
+    return res.status(500).json({ success: false, error: "Failed to create staff user in database" });
   }
 });
 userRouter.put("/:id", requireRole(["Superadmin"]), async (req, res) => {
+  if (!await ensureDbConnected(res)) return;
   const { id } = req.params;
-  const { full_name, role, contractor_name, area, phone } = req.body || {};
+  const { full_name, email, role, contractor_name, area, phone, password } = req.body || {};
   try {
     const userRes = await query("SELECT * FROM staff_users WHERE id = $1", [id]);
     if (userRes.rowCount === 0) {
       return res.status(404).json({ success: false, error: "Staff user not found" });
     }
-    const user = userRes.rows[0];
-    if (user.role === "Superadmin" && role && role !== "Superadmin") {
-      const activeSuperadmins = await query(
-        "SELECT COUNT(*)::int AS count FROM staff_users WHERE role = 'Superadmin' AND is_active = TRUE"
-      );
-      if ((activeSuperadmins.rows[0]?.count || 0) <= 1) {
+    const currentStaff = userRes.rows[0];
+    if (id === req.user.id && role && role !== req.user.role) {
+      return res.status(400).json({
+        success: false,
+        error: "You cannot change your own role"
+      });
+    }
+    let updatedRole = currentStaff.role;
+    let roleChanged = false;
+    if (role && typeof role === "string" && role.trim()) {
+      const cleanRole = role.trim();
+      if (!VALID_ROLES.includes(cleanRole)) {
         return res.status(400).json({
           success: false,
-          error: "Cannot demote the last remaining active Superadmin"
+          error: `Invalid role '${cleanRole}'`
         });
       }
+      const roleDbCheck = await query("SELECT id FROM roles WHERE id = $1", [cleanRole]);
+      if (roleDbCheck.rowCount === 0) {
+        return res.status(400).json({
+          success: false,
+          error: `Role '${cleanRole}' does not exist in database`
+        });
+      }
+      if (cleanRole !== currentStaff.role) {
+        if (currentStaff.role === "Superadmin" && cleanRole !== "Superadmin") {
+          const activeSuperadmins = await query(
+            "SELECT COUNT(*)::int AS count FROM staff_users WHERE role = 'Superadmin' AND is_active = TRUE"
+          );
+          if ((activeSuperadmins.rows[0]?.count || 0) <= 1) {
+            return res.status(400).json({
+              success: false,
+              error: "Cannot demote the last remaining active Superadmin"
+            });
+          }
+        }
+        updatedRole = cleanRole;
+        roleChanged = true;
+      }
     }
-    const updatedFullName = full_name ? String(full_name).trim() : user.full_name;
-    const updatedRole = role || user.role;
-    const updatedContractor = contractor_name !== void 0 ? contractor_name ? String(contractor_name).trim() : null : user.contractor_name;
-    const updatedArea = area !== void 0 ? area ? String(area).trim() : null : user.area;
-    const updatedPhone = phone !== void 0 ? phone ? String(phone).trim() : null : user.phone;
+    let updatedEmail = currentStaff.email;
+    if (email && typeof email === "string" && email.trim()) {
+      const cleanEmail = email.trim().toLowerCase();
+      if (cleanEmail !== currentStaff.email) {
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+          return res.status(400).json({ success: false, error: "Invalid email format" });
+        }
+        const dupEmail = await query(
+          "SELECT id FROM staff_users WHERE LOWER(email) = LOWER($1) AND id <> $2 LIMIT 1",
+          [cleanEmail, id]
+        );
+        if (dupEmail.rowCount && dupEmail.rowCount > 0) {
+          return res.status(409).json({ success: false, error: "Email is already in use by another user" });
+        }
+        updatedEmail = cleanEmail;
+      }
+    }
+    const updatedFullName = full_name ? String(full_name).trim() : currentStaff.full_name;
+    const updatedContractor = contractor_name !== void 0 ? contractor_name ? String(contractor_name).trim() : null : currentStaff.contractor_name;
+    const updatedArea = area !== void 0 ? area ? String(area).trim() : null : currentStaff.area;
+    const updatedPhone = phone !== void 0 ? phone ? String(phone).trim() : null : currentStaff.phone;
+    let passwordUpdated = false;
+    if (password && typeof password === "string" && password.trim().length > 0) {
+      if (password.length < 8) {
+        return res.status(400).json({ success: false, error: "New password must be at least 8 characters long" });
+      }
+      const salt = await bcrypt3.genSalt(10);
+      const passwordHash = await bcrypt3.hash(password, salt);
+      await query("UPDATE staff_users SET password_hash = $1, updated_at = NOW() WHERE id = $2", [passwordHash, id]);
+      passwordUpdated = true;
+    }
     const updateRes = await query(
       `UPDATE staff_users
-       SET full_name = $1, role = $2, contractor_name = $3, area = $4, phone = $5, updated_at = NOW()
-       WHERE id = $6
+       SET full_name = $1, email = $2, role = $3, contractor_name = $4, area = $5, phone = $6, updated_at = NOW()
+       WHERE id = $7
        RETURNING id, username, email, full_name, role, contractor_name, area, phone, avatar_url, is_active, last_login_at, created_at, updated_at`,
-      [updatedFullName, updatedRole, updatedContractor, updatedArea, updatedPhone, id]
+      [updatedFullName, updatedEmail, updatedRole, updatedContractor, updatedArea, updatedPhone, id]
     );
     const safeUser = updateRes.rows[0];
+    if (roleChanged || passwordUpdated) {
+      await revokeAllUserSessions(id);
+    }
     await addPostgresAuditLog({
       user_id: req.user.id,
       user_name: req.user.full_name,
       role: req.user.role,
-      activity: "UPDATE_STAFF_USER",
+      activity: roleChanged ? "CHANGE_USER_ROLE" : "UPDATE_STAFF_USER",
       module: "Management User",
-      record_id: user.id,
-      diff_data: { full_name: safeUser.full_name, role: safeUser.role, contractor_name: safeUser.contractor_name, area: safeUser.area },
+      record_id: id,
+      diff_data: {
+        full_name: safeUser.full_name,
+        email: safeUser.email,
+        role: safeUser.role,
+        contractor_name: safeUser.contractor_name,
+        area: safeUser.area,
+        role_changed: roleChanged,
+        password_updated: passwordUpdated
+      },
       ip_address: getClientIp(req),
       user_agent: req.headers["user-agent"] || void 0
     });
     return res.json({
       success: true,
       message: "Staff user updated successfully",
-      user: safeUser
+      user: {
+        id: safeUser.id,
+        username: safeUser.username,
+        email: safeUser.email,
+        full_name: safeUser.full_name,
+        role: safeUser.role,
+        contractor_name: safeUser.contractor_name || void 0,
+        area: safeUser.area || void 0,
+        phone: safeUser.phone || void 0,
+        avatar_url: safeUser.avatar_url || void 0,
+        is_active: safeUser.is_active,
+        last_login_at: safeUser.last_login_at ? new Date(safeUser.last_login_at).toISOString() : void 0,
+        created_at: new Date(safeUser.created_at).toISOString(),
+        updated_at: new Date(safeUser.updated_at).toISOString()
+      }
     });
   } catch (err) {
     console.error("Update user error:", err.message);
@@ -1531,18 +1767,31 @@ userRouter.put("/:id", requireRole(["Superadmin"]), async (req, res) => {
   }
 });
 userRouter.patch("/:id/status", requireRole(["Superadmin"]), async (req, res) => {
+  if (!await ensureDbConnected(res)) return;
   const { id } = req.params;
   const { is_active } = req.body || {};
   if (typeof is_active !== "boolean") {
     return res.status(400).json({ success: false, error: "is_active must be a boolean" });
   }
   try {
-    const userRes = await query("SELECT id, username, role FROM staff_users WHERE id = $1", [id]);
+    const userRes = await query("SELECT id, username, role, is_active FROM staff_users WHERE id = $1", [id]);
     if (userRes.rowCount === 0) {
       return res.status(404).json({ success: false, error: "Staff user not found" });
     }
+    const targetUser = userRes.rows[0];
     if (id === req.user.id && !is_active) {
       return res.status(400).json({ success: false, error: "You cannot deactivate your own account" });
+    }
+    if (targetUser.role === "Superadmin" && !is_active) {
+      const activeSuperadmins = await query(
+        "SELECT COUNT(*)::int AS count FROM staff_users WHERE role = 'Superadmin' AND is_active = TRUE"
+      );
+      if ((activeSuperadmins.rows[0]?.count || 0) <= 1) {
+        return res.status(400).json({
+          success: false,
+          error: "Cannot deactivate the last remaining active Superadmin"
+        });
+      }
     }
     await query("UPDATE staff_users SET is_active = $1, updated_at = NOW() WHERE id = $2", [is_active, id]);
     if (!is_active) {
@@ -1555,6 +1804,7 @@ userRouter.patch("/:id/status", requireRole(["Superadmin"]), async (req, res) =>
       activity: is_active ? "ACTIVATE_STAFF_USER" : "DEACTIVATE_STAFF_USER",
       module: "Management User",
       record_id: id,
+      diff_data: { username: targetUser.username, is_active },
       ip_address: getClientIp(req),
       user_agent: req.headers["user-agent"] || void 0
     });
@@ -1568,7 +1818,56 @@ userRouter.patch("/:id/status", requireRole(["Superadmin"]), async (req, res) =>
     return res.status(500).json({ success: false, error: "Failed to update account status" });
   }
 });
+userRouter.delete("/:id", requireRole(["Superadmin"]), async (req, res) => {
+  if (!await ensureDbConnected(res)) return;
+  const { id } = req.params;
+  try {
+    const userRes = await query("SELECT id, username, role, is_active FROM staff_users WHERE id = $1", [id]);
+    if (userRes.rowCount === 0) {
+      return res.status(404).json({ success: false, error: "Staff user not found" });
+    }
+    const targetUser = userRes.rows[0];
+    if (id === req.user.id) {
+      return res.status(400).json({
+        success: false,
+        error: "You cannot delete your own account"
+      });
+    }
+    if (targetUser.role === "Superadmin") {
+      const activeSuperadmins = await query(
+        "SELECT COUNT(*)::int AS count FROM staff_users WHERE role = 'Superadmin' AND is_active = TRUE"
+      );
+      if ((activeSuperadmins.rows[0]?.count || 0) <= 1) {
+        return res.status(400).json({
+          success: false,
+          error: "Cannot delete the last remaining active Superadmin"
+        });
+      }
+    }
+    await revokeAllUserSessions(id);
+    await query("DELETE FROM staff_users WHERE id = $1", [id]);
+    await addPostgresAuditLog({
+      user_id: req.user.id,
+      user_name: req.user.full_name,
+      role: req.user.role,
+      activity: "DELETE_STAFF_USER",
+      module: "Management User",
+      record_id: id,
+      diff_data: { username: targetUser.username, role: targetUser.role },
+      ip_address: getClientIp(req),
+      user_agent: req.headers["user-agent"] || void 0
+    });
+    return res.json({
+      success: true,
+      message: `Staff user '${targetUser.username}' deleted successfully`
+    });
+  } catch (err) {
+    console.error("Delete user error:", err.message);
+    return res.status(500).json({ success: false, error: "Failed to delete staff user" });
+  }
+});
 userRouter.post("/:id/reset-password", requireRole(["Superadmin"]), async (req, res) => {
+  if (!await ensureDbConnected(res)) return;
   const { id } = req.params;
   const { new_password } = req.body || {};
   if (!new_password || typeof new_password !== "string" || new_password.length < 8) {
@@ -1593,6 +1892,7 @@ userRouter.post("/:id/reset-password", requireRole(["Superadmin"]), async (req, 
       activity: "RESET_STAFF_PASSWORD",
       module: "Management User",
       record_id: id,
+      diff_data: { username: userRes.rows[0].username },
       ip_address: getClientIp(req),
       user_agent: req.headers["user-agent"] || void 0
     });
@@ -2742,42 +3042,97 @@ function safeEqual(a, b) {
   return aa.length === bb.length && crypto7.timingSafeEqual(aa, bb);
 }
 setupRouter.get("/status", async (_req, res) => {
-  if (!pool) return res.status(503).json({ success: false, available: false, error: "Database is unavailable" });
+  const dbStatus = await checkConnection();
+  if (!dbStatus.connected || !pool) {
+    return res.status(503).json({
+      success: false,
+      available: false,
+      error: "Database is unavailable. Configure DATABASE_URL before setting up Superadmin.",
+      code: "DATABASE_UNAVAILABLE"
+    });
+  }
   try {
     const result = await pool.query(
       "SELECT EXISTS (SELECT 1 FROM staff_users WHERE role = 'Superadmin') AS has_superadmin"
     );
     const hasSuperadmin = Boolean(result.rows[0]?.has_superadmin);
-    return res.json({ success: true, available: !hasSuperadmin });
-  } catch {
-    return res.status(503).json({ success: false, available: false, error: "Unable to check setup status" });
+    return res.json({
+      success: true,
+      available: !hasSuperadmin
+    });
+  } catch (err) {
+    console.error("Setup status error:", err?.message || "Unknown database error");
+    return res.status(503).json({
+      success: false,
+      available: false,
+      error: "Unable to check setup status from database",
+      code: "DATABASE_ERROR"
+    });
   }
 });
 setupRouter.post("/superadmin", async (req, res) => {
   const setupToken = process.env.WEBJAWS_SETUP_TOKEN || "";
   const suppliedToken = typeof req.body?.setupToken === "string" ? req.body.setupToken : "";
   if (!setupToken || !suppliedToken || !safeEqual(setupToken, suppliedToken)) {
-    return res.status(403).json({ success: false, error: "Setup authorization failed" });
+    return res.status(403).json({
+      success: false,
+      error: "Setup authorization failed. Invalid or unconfigured setup token."
+    });
   }
-  if (!pool) return res.status(503).json({ success: false, error: "Database is unavailable" });
+  const dbStatus = await checkConnection();
+  if (!dbStatus.connected || !pool) {
+    return res.status(503).json({
+      success: false,
+      error: "Database is unavailable",
+      code: "DATABASE_UNAVAILABLE"
+    });
+  }
   const { fullName, username, email, password } = req.body || {};
   if (![fullName, username, email, password].every((v) => typeof v === "string" && v.trim())) {
     return res.status(400).json({ success: false, error: "All fields are required" });
   }
-  if (fullName.trim().length > 128 || username.trim().length < 3 || username.trim().length > 64 || email.trim().length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
-    return res.status(400).json({ success: false, error: "Please check name, username, and email format" });
+  const cleanFullName = String(fullName).trim();
+  const cleanUsername = String(username).trim().toLowerCase();
+  const cleanEmail = String(email).trim().toLowerCase();
+  if (cleanFullName.length < 2 || cleanFullName.length > 128) {
+    return res.status(400).json({ success: false, error: "Full name must be 2\u2013128 characters" });
   }
-  if (password.length < 12 || password.length > 128) {
+  if (cleanUsername.length < 3 || cleanUsername.length > 64 || !/^[a-zA-Z0-9._-]+$/.test(cleanUsername)) {
+    return res.status(400).json({
+      success: false,
+      error: "Username must be 3\u201364 characters and contain only letters, numbers, dots, dashes, or underscores"
+    });
+  }
+  if (cleanEmail.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    return res.status(400).json({ success: false, error: "Please enter a valid email address" });
+  }
+  if (typeof password !== "string" || password.length < 12 || password.length > 128) {
     return res.status(400).json({ success: false, error: "Password must be 12\u2013128 characters" });
   }
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtext('webjaws_first_superadmin_setup'))");
-    const existing = await client.query("SELECT 1 FROM staff_users WHERE role = 'Superadmin' LIMIT 1");
-    if (existing.rowCount) {
+    const existingSuperadmin = await client.query(
+      "SELECT 1 FROM staff_users WHERE role = 'Superadmin' LIMIT 1"
+    );
+    if (existingSuperadmin.rowCount && existingSuperadmin.rowCount > 0) {
       await client.query("ROLLBACK");
-      return res.status(409).json({ success: false, error: "A Superadmin already exists. Initial setup is closed." });
+      return res.status(409).json({
+        success: false,
+        error: "A Superadmin already exists. Initial setup is closed permanently."
+      });
+    }
+    const existingUser = await client.query(
+      "SELECT id FROM staff_users WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($2) LIMIT 1",
+      [cleanUsername, cleanEmail]
+    );
+    if (existingUser.rowCount && existingUser.rowCount > 0) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        success: false,
+        error: "A user with this username or email already exists in the system"
+      });
     }
     await client.query(
       `INSERT INTO roles (id, name, description, is_system)
@@ -2786,24 +3141,37 @@ setupRouter.post("/superadmin", async (req, res) => {
     );
     const passwordHash = await bcrypt4.hash(password, 12);
     const inserted = await client.query(
-      `INSERT INTO staff_users (username, email, password_hash, full_name, role, is_active)
-       VALUES ($1, $2, $3, $4, 'Superadmin', TRUE)
-       RETURNING id, username, email, full_name, role, is_active, created_at`,
-      [username.trim(), email.trim().toLowerCase(), passwordHash, fullName.trim()]
+      `INSERT INTO staff_users (username, email, password_hash, full_name, role, is_active, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, 'Superadmin', TRUE, NOW(), NOW())
+       RETURNING id, username, email, full_name, role, is_active, created_at, updated_at`,
+      [cleanUsername, cleanEmail, passwordHash, cleanFullName]
     );
     const user = inserted.rows[0];
     await client.query(
-      `INSERT INTO audit_logs (user_id, user_name, role, activity, module, record_id, ip_address, user_agent)
-       VALUES ($1, $2, 'Superadmin', 'INITIAL_SUPERADMIN_CREATED', 'Authentication', $3, $4, $5)`,
-      [user.id, user.full_name, user.username, req.ip, req.headers["user-agent"] || null]
+      `INSERT INTO audit_logs (user_id, user_name, role, activity, module, record_id, diff_data, ip_address, user_agent, created_at)
+       VALUES ($1, $2, 'Superadmin', 'INITIAL_SUPERADMIN_CREATED', 'Authentication', $3, $4, $5, $6, NOW())`,
+      [
+        user.id,
+        user.full_name,
+        user.id,
+        JSON.stringify({ username: user.username, email: user.email, role: user.role }),
+        req.ip || "127.0.0.1",
+        req.headers["user-agent"] || null
+      ]
     );
     await client.query("COMMIT");
-    return res.status(201).json({ success: true, message: "Initial Superadmin created. You can now sign in.", user });
+    return res.status(201).json({
+      success: true,
+      message: "Initial Superadmin created successfully. You can now sign in.",
+      user
+    });
   } catch (error) {
     await client.query("ROLLBACK");
-    if (error?.code === "23505") return res.status(409).json({ success: false, error: "Username or email is already registered" });
+    if (error?.code === "23505") {
+      return res.status(409).json({ success: false, error: "Username or email is already registered" });
+    }
     console.error("Initial Superadmin setup failed:", error?.message || "Unknown error");
-    return res.status(500).json({ success: false, error: "Unable to create initial Superadmin" });
+    return res.status(500).json({ success: false, error: "Unable to create initial Superadmin due to database failure" });
   } finally {
     client.release();
   }
@@ -2838,11 +3206,18 @@ function isTrustedOrigin(candidateOriginStr, req) {
   if (isProd2 && !isLocalCandidate && candidate.protocol !== "https:") {
     return false;
   }
-  if (candidate.host.toLowerCase() === reqHost.toLowerCase()) {
-    if (isProd2 && !isLocalCandidate) {
-      return candidate.protocol === "https:";
+  const forwardedHost = req.headers["x-forwarded-host"];
+  const hostCandidates = [reqHost];
+  if (typeof forwardedHost === "string") {
+    hostCandidates.push(forwardedHost.split(",")[0].trim());
+  }
+  if (candidate.host.endsWith(".run.app") || candidate.host.endsWith(".google.com")) {
+    return true;
+  }
+  for (const host of hostCandidates) {
+    if (candidate.host.toLowerCase() === host.toLowerCase()) {
+      return true;
     }
-    return candidate.protocol === expectedProto || candidate.protocol === "http:" || candidate.protocol === "https:";
   }
   if (!isProd2 || isLocalCandidate) {
     const [candidateHostname, candidatePort = candidate.protocol === "https:" ? "443" : "80"] = candidate.host.split(":");
@@ -2913,7 +3288,7 @@ dotenv2.config({ override: true });
 var __filename2 = fileURLToPath2(import.meta.url);
 var __dirname2 = path2.dirname(__filename2);
 var app = express();
-var port = parseInt(process.env.PORT || "3000", 10);
+var port = 3e3;
 var isProd = process.env.NODE_ENV === "production";
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true, limit: "25mb" }));
@@ -2938,10 +3313,24 @@ async function startServer() {
   if (!isProd) {
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false },
       appType: "spa"
     });
     app.use(vite.middlewares);
+    app.use("*", async (req, res, next) => {
+      const url = req.originalUrl;
+      if (url.startsWith("/api")) {
+        return next();
+      }
+      try {
+        let template = fs3.readFileSync(path2.resolve(__dirname2, "index.html"), "utf-8");
+        template = await vite.transformIndexHtml(url, template);
+        res.status(200).set({ "Content-Type": "text/html" }).end(template);
+      } catch (e) {
+        vite.ssrFixStacktrace(e);
+        next(e);
+      }
+    });
   } else {
     const distPath = path2.resolve(__dirname2, "dist");
     app.use(express.static(distPath));

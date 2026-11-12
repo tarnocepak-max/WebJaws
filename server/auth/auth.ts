@@ -70,15 +70,16 @@ export async function createPostgresSession(
   userAgent: string,
   durationHours = 24
 ): Promise<AuthSession> {
-  const rawToken = crypto.randomBytes(48).toString('hex');
-  const tokenHash = hashSessionToken(rawToken);
   const safeDuration = Number.isFinite(durationHours) && durationHours >= 1 && durationHours <= 720 ? durationHours : 24;
-  const expiresAt = new Date(Date.now() + safeDuration * 3600 * 1000);
 
   const dbStatus = await checkConnection();
   if (!dbStatus.connected) {
-    throw new Error(`Database unavailable for session creation: ${dbStatus.error || 'Connection failed'}`);
+    throw new Error('Database is unavailable. Cannot create session without PostgreSQL connection.');
   }
+
+  const rawToken = crypto.randomBytes(48).toString('hex');
+  const tokenHash = hashSessionToken(rawToken);
+  const expiresAt = new Date(Date.now() + safeDuration * 3600 * 1000);
 
   const res = await query(
     `INSERT INTO auth_sessions (token_hash, user_id, ip_address, user_agent, expires_at, last_active_at, created_at)
@@ -100,24 +101,28 @@ export async function createPostgresSession(
   };
 }
 
-// Revoke a specific session from PostgreSQL using token hash (never queries raw token)
+// Revoke a specific session from PostgreSQL using token hash
 export async function revokePostgresSession(rawToken: string): Promise<void> {
   if (!rawToken) return;
+  const dbStatus = await checkConnection();
+  if (!dbStatus.connected) return;
   const tokenHash = hashSessionToken(rawToken);
-  // Strictly delete by token_hash, do not fall back to in-memory store
   await query('DELETE FROM auth_sessions WHERE token_hash = $1', [tokenHash]);
 }
 
 // Revoke all sessions belonging to a specific user from PostgreSQL
 export async function revokeAllUserSessions(userId: string): Promise<void> {
   if (!userId) return;
-  // Strictly delete from PostgreSQL, do not fall back to in-memory store
+  const dbStatus = await checkConnection();
+  if (!dbStatus.connected) return;
   await query('DELETE FROM auth_sessions WHERE user_id = $1', [userId]);
 }
 
-// Record login attempt in PostgreSQL login_attempts (strictly sanitized, never records password)
+// Record login attempt in PostgreSQL login_attempts
 export async function recordPostgresLoginAttempt(identifier: string, ip: string, success: boolean): Promise<void> {
   const cleanIdentifier = identifier.toLowerCase().trim();
+  const dbStatus = await checkConnection();
+  if (!dbStatus.connected) return;
   await query(
     `INSERT INTO login_attempts (identifier, ip_address, success, attempt_time)
      VALUES ($1, $2, $3, NOW())`,
@@ -125,13 +130,16 @@ export async function recordPostgresLoginAttempt(identifier: string, ip: string,
   );
 }
 
-// Check brute-force rate limit from PostgreSQL login_attempts (max 5 failed attempts in 15 mins per identifier)
-// Fails safely if PostgreSQL is unavailable (no in-memory fallback)
+// Check brute-force rate limit from PostgreSQL login_attempts
 export async function checkPostgresRateLimit(
   identifier: string,
-  _ip: string
+  ip: string
 ): Promise<{ limited: boolean; retryAfterSeconds?: number }> {
   const cleanIdentifier = identifier.toLowerCase().trim();
+  const dbStatus = await checkConnection();
+  if (!dbStatus.connected) {
+    return { limited: false };
+  }
 
   const res = await query(
     `SELECT COUNT(*)::int AS failed_count, MIN(attempt_time) AS oldest_attempt
@@ -187,6 +195,10 @@ export async function addPostgresAuditLog(entry: {
   ip_address: string;
   user_agent?: string;
 }): Promise<void> {
+  const dbStatus = await checkConnection();
+  if (!dbStatus.connected) {
+    return;
+  }
   const sanitizedDiff = entry.diff_data ? JSON.stringify(sanitizeAuditData(entry.diff_data)) : null;
 
   await query(
@@ -211,6 +223,15 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
   const token = extractSessionToken(req);
   if (!token) {
     return res.status(401).json({ success: false, error: 'Authentication required', code: 'AUTH_REQUIRED' });
+  }
+
+  const dbStatus = await checkConnection();
+  if (!dbStatus.connected) {
+    return res.status(503).json({
+      success: false,
+      error: 'Authentication service temporarily unavailable',
+      code: 'DATABASE_UNAVAILABLE',
+    });
   }
 
   const tokenHash = hashSessionToken(token);

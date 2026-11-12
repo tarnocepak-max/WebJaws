@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import bcrypt from 'bcryptjs';
-import { query } from '../db/db.js';
+import { query, checkConnection } from '../db/db.js';
 import { webJawsStore } from '../db/store.js';
 import {
   AuthenticatedRequest,
@@ -35,6 +35,16 @@ authRouter.post('/login', async (req, res) => {
   }
 
   const cleanIdentifier = identifier.trim().toLowerCase();
+  const dbStatus = await checkConnection();
+
+  // Fail closed if PostgreSQL is not connected - strictly no memory fallback
+  if (!dbStatus.connected) {
+    return res.status(503).json({
+      success: false,
+      error: 'Authentication service temporarily unavailable',
+      code: 'DATABASE_UNAVAILABLE',
+    });
+  }
 
   // Rate Limiting check against PostgreSQL login_attempts (fail closed if DB is unavailable)
   try {

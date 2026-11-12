@@ -1,3 +1,4 @@
+import fs from 'fs';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
@@ -19,7 +20,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const port = parseInt(process.env.PORT || '3000', 10);
+// AI Studio dev environment requires port 3000. Ignore cloud container PORT=8080 to avoid EADDRINUSE
+const port = 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
 // Body parsers with support for large Excel/Text imports
@@ -54,10 +56,26 @@ async function startServer() {
     // Mount Vite dev server middleware in development
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false },
       appType: 'spa',
     });
     app.use(vite.middlewares);
+
+    // Serve transformed index.html for SPA routes
+    app.use('*', async (req, res, next) => {
+      const url = req.originalUrl;
+      if (url.startsWith('/api')) {
+        return next();
+      }
+      try {
+        let template = fs.readFileSync(path.resolve(__dirname, 'index.html'), 'utf-8');
+        template = await vite.transformIndexHtml(url, template);
+        res.status(200).set({ 'Content-Type': 'text/html' }).end(template);
+      } catch (e: any) {
+        vite.ssrFixStacktrace(e);
+        next(e);
+      }
+    });
   } else {
     // Serve production build
     const distPath = path.resolve(__dirname, 'dist');

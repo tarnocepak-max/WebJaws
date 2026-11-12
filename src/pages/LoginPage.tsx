@@ -9,6 +9,17 @@ export const LoginPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  const [setupAvailable, setSetupAvailable] = useState<boolean>(false);
+
+  React.useEffect(() => {
+    fetch('/api/setup/status', { credentials: 'include' })
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.available) setSetupAvailable(true);
+      })
+      .catch(() => {});
+  }, []);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -38,6 +49,22 @@ export const LoginPage: React.FC = () => {
             Integrated Operations &amp; Ticket Management Platform
           </p>
         </div>
+
+        {/* Setup Available Notice */}
+        {setupAvailable && (
+          <div className="mb-4 p-3.5 rounded-2xl bg-sky-950/80 border border-sky-800 text-sky-200 text-xs flex items-center justify-between shadow-xl backdrop-blur-md">
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-sky-400 shrink-0" />
+              <span>Akun Superadmin pertama belum dibuat.</span>
+            </div>
+            <a
+              href="/?setup=1"
+              className="px-2.5 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-[11px] transition shadow"
+            >
+              Setup Sekarang &rarr;
+            </a>
+          </div>
+        )}
 
         {/* Login Form Card */}
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl backdrop-blur-xl">

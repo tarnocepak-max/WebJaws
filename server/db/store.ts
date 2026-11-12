@@ -168,6 +168,7 @@ export interface AuditLog {
   record_id?: string;
   diff_data?: any;
   ip_address: string;
+  user_agent?: string;
   created_at: string;
 }
 

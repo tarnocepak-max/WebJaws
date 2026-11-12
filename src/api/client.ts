@@ -36,23 +36,39 @@ export const api = {
   getMe: () =>
     apiFetch<{ success: boolean; user: StaffUser; appConfig: AppConfig }>('/api/auth/me'),
 
-  // Users (Superadmin)
+  // Setup (First-time Superadmin)
+  getSetupStatus: () => apiFetch<{ success: boolean; available: boolean }>('/api/setup/status'),
+  setupSuperadmin: (data: { fullName: string; username: string; email: string; password: string; setupToken: string }) =>
+    apiFetch<{ success: boolean; message: string; user: StaffUser }>('/api/setup/superadmin', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  // Users (Superadmin & IT Support Application)
   getUsers: (params?: Record<string, string>) => {
     const qs = params ? new URLSearchParams(params).toString() : '';
     return apiFetch<{ success: boolean; total: number; users: StaffUser[] }>(`/api/users${qs ? '?' + qs : ''}`);
   },
+  getUserById: (id: string) =>
+    apiFetch<{ success: boolean; user: StaffUser }>(`/api/users/${id}`),
+  getRoles: () =>
+    apiFetch<{ success: boolean; roles: Array<{ id: string; name: string; description: string; is_system: boolean }> }>('/api/users/roles'),
   createUser: (data: any) =>
-    apiFetch<{ success: boolean; user: StaffUser }>('/api/users', {
+    apiFetch<{ success: boolean; user: StaffUser; message: string }>('/api/users', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
   updateUser: (id: string, data: any) =>
-    apiFetch<{ success: boolean; user: StaffUser }>(`/api/users/${id}`, {
+    apiFetch<{ success: boolean; user: StaffUser; message: string }>(`/api/users/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
     }),
+  deleteUser: (id: string) =>
+    apiFetch<{ success: boolean; message: string }>(`/api/users/${id}`, {
+      method: 'DELETE',
+    }),
   toggleUserStatus: (id: string, is_active: boolean) =>
-    apiFetch<{ success: boolean; is_active: boolean }>(`/api/users/${id}/status`, {
+    apiFetch<{ success: boolean; is_active: boolean; message: string }>(`/api/users/${id}/status`, {
       method: 'PATCH',
       body: JSON.stringify({ is_active }),
     }),

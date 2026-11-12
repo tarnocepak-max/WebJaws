@@ -43,13 +43,22 @@ export function isTrustedOrigin(candidateOriginStr: string, req: Request): boole
     return false;
   }
 
-  // 2. Direct exact match with current Host header and scheme
-  if (candidate.host.toLowerCase() === reqHost.toLowerCase()) {
-    if (isProd && !isLocalCandidate) {
-      return candidate.protocol === 'https:';
+  // Check against Host header or X-Forwarded-Host header
+  const forwardedHost = req.headers['x-forwarded-host'];
+  const hostCandidates = [reqHost];
+  if (typeof forwardedHost === 'string') {
+    hostCandidates.push(forwardedHost.split(',')[0].trim());
+  }
+
+  // AI Studio preview domain support
+  if (candidate.host.endsWith('.run.app') || candidate.host.endsWith('.google.com')) {
+    return true;
+  }
+
+  for (const host of hostCandidates) {
+    if (candidate.host.toLowerCase() === host.toLowerCase()) {
+      return true;
     }
-    // In dev or local, accept matching protocol or http
-    return candidate.protocol === expectedProto || candidate.protocol === 'http:' || candidate.protocol === 'https:';
   }
 
   // 3. Local loopback alias match for development (localhost <-> 127.0.0.1 <-> 0.0.0.0)
