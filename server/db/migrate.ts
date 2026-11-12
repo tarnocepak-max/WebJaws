@@ -124,3 +124,16 @@ export async function runMigrations(): Promise<MigrationResult> {
     client.release();
   }
 }
+
+if (process.argv[1] && (process.argv[1].endsWith('migrate.ts') || process.argv[1].endsWith('migrate.js'))) {
+  runMigrations()
+    .then((r) => {
+      console.log(JSON.stringify(r, null, 2));
+      process.exit(r.success ? 0 : 1);
+    })
+    .catch((e) => {
+      console.error(e);
+      process.exit(1);
+    });
+}
+

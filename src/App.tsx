@@ -11,11 +11,15 @@ import { UserManagementPage } from './pages/UserManagementPage';
 import { AppSettingPage } from './pages/AppSettingPage';
 import { DroplistSettingPage } from './pages/DroplistSettingPage';
 import { DatabaseAppPage } from './pages/DatabaseAppPage';
+import { FirstSuperadminSetupPage } from './pages/FirstSuperadminSetupPage';
 import { RefreshCw } from 'lucide-react';
 
 function AppRouter() {
   const { user, loading } = useAuth();
   const [currentPath, setCurrentPath] = useState<string>('/dashboard');
+  const [showSetup, setShowSetup] = useState(
+    () => new URLSearchParams(window.location.search).get('setup') === '1'
+  );
 
   useEffect(() => {
     // If installer logs in, default to installer dashboard
@@ -39,6 +43,16 @@ function AppRouter() {
   }
 
   if (!user) {
+    if (showSetup) {
+      return (
+        <FirstSuperadminSetupPage
+          onComplete={() => {
+            window.history.replaceState({}, '', window.location.pathname);
+            setShowSetup(false);
+          }}
+        />
+      );
+    }
     return <LoginPage />;
   }
 

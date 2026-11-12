@@ -1,16 +1,20 @@
 {
-  "name": "react-example",
+  "name": "webjaws",
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build",
-    "start": "node server.ts",
+    "build": "tsc --noEmit && vite build && esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=server.js",
+    "start": "node server.js",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "migrate": "tsx -e \"import('./server/db/migrate.js').then(m => m.runMigrations()).then(r => { console.log(JSON.stringify(r, null, 2)); process.exit(r.success ? 0 : 1); }).catch(e => { console.error(e); process.exit(1); })\"",
+    "migrate": "tsx server/db/migrate.ts",
     "seed:demo": "tsx server/db/seedDemoAdmin.ts",
     "remove:demo": "tsx server/db/removeDemoAdmin.ts",
     "test:auth": "tsx scripts/testAuthVerification.ts",
@@ -40,7 +44,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
-    "esbuild": "^0.25.0",
+    "esbuild": "^0.28.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2",
