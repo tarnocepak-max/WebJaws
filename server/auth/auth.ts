@@ -26,15 +26,58 @@ export function getClientIp(req: Request): string {
   return req.socket.remoteAddress || '127.0.0.1';
 }
 
+function resolveCookieSecurity(req?: Request): { secure: boolean; sameSite: 'lax' | 'none' } {
+  const isProd = process.env.NODE_ENV === 'production';
+  if (!req) {
+    return {
+      secure: isProd,
+      sameSite: 'lax',
+    };
+  }
+
+  const forwardedProto = req.headers['x-forwarded-proto'];
+  const proto = typeof forwardedProto === 'string'
+    ? forwardedProto.split(',')[0].trim().toLowerCase()
+    : req.protocol?.toLowerCase();
+  const isHttps = Boolean(req.secure || proto === 'https');
+
+  const secFetchSite = typeof req.headers['sec-fetch-site'] === 'string'
+    ? req.headers['sec-fetch-site'].toLowerCase()
+    : '';
+  const secFetchDest = typeof req.headers['sec-fetch-dest'] === 'string'
+    ? req.headers['sec-fetch-dest'].toLowerCase()
+    : '';
+  const host = (req.get('host') || '').toLowerCase();
+
+  const isCrossSiteIframe = isHttps && (
+    secFetchSite === 'cross-site' ||
+    secFetchDest === 'iframe' ||
+    host.endsWith('.run.app')
+  );
+
+  if (isCrossSiteIframe) {
+    return {
+      secure: true,
+      sameSite: 'none',
+    };
+  }
+
+  return {
+    secure: isHttps || isProd,
+    sameSite: 'lax',
+  };
+}
+
 /**
  * Standard secure cookie options for session cookie
  */
-export function getSessionCookieOptions(durationHours = 24) {
+export function getSessionCookieOptions(durationHours = 24, req?: Request) {
   const safeHours = Number.isFinite(durationHours) && durationHours >= 1 && durationHours <= 720 ? durationHours : 24;
+  const { secure, sameSite } = resolveCookieSecurity(req);
   return {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax' as const,
+    secure,
+    sameSite,
     maxAge: safeHours * 3600 * 1000,
     path: '/',
   };
@@ -43,11 +86,12 @@ export function getSessionCookieOptions(durationHours = 24) {
 /**
  * Standard options to clear the session cookie cleanly
  */
-export function getClearCookieOptions() {
+export function getClearCookieOptions(req?: Request) {
+  const { secure, sameSite } = resolveCookieSecurity(req);
   return {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax' as const,
+    secure,
+    sameSite,
     path: '/',
   };
 }
@@ -241,7 +285,6 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
       `SELECT 
         s.id AS session_id,
         s.token_hash,
-        s.user_id,
         s.expires_at,
         s.last_active_at,
         u.id AS user_id,
@@ -264,7 +307,7 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
     );
 
     if (sessionRes.rowCount === 0) {
-      res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions());
+      res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions(req));
       return res.status(401).json({ success: false, error: 'Session invalid or expired', code: 'SESSION_EXPIRED' });
     }
 
@@ -275,7 +318,7 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
       const computedBuf = Buffer.from(tokenHash, 'hex');
       const storedBuf = Buffer.from(row.token_hash, 'hex');
       if (computedBuf.length !== storedBuf.length || !crypto.timingSafeEqual(computedBuf, storedBuf)) {
-        res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions());
+        res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions(req));
         return res.status(401).json({ success: false, error: 'Session verification failed', code: 'SESSION_EXPIRED' });
       }
     }
@@ -283,14 +326,14 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
     // Check expiration
     if (new Date(row.expires_at).getTime() < Date.now()) {
       await revokePostgresSession(token).catch(() => {});
-      res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions());
+      res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions(req));
       return res.status(401).json({ success: false, error: 'Session expired', code: 'SESSION_EXPIRED' });
     }
 
     // Check active status
     if (!row.is_active) {
       await revokePostgresSession(token).catch(() => {});
-      res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions());
+      res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions(req));
       return res.status(403).json({ success: false, error: 'Account is inactive', code: 'ACCOUNT_INACTIVE' });
     }
 

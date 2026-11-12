@@ -20,6 +20,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.set('trust proxy', 1);
 // AI Studio dev environment requires port 3000. Ignore cloud container PORT=8080 to avoid EADDRINUSE
 const port = 3000;
 const isProd = process.env.NODE_ENV === 'production';

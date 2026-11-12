@@ -127,7 +127,7 @@ authRouter.post('/login', async (req, res) => {
     const session = await createPostgresSession(user.id, ip, userAgent, safeDurationHours);
 
     // Set secure HttpOnly cookie
-    res.cookie(SESSION_COOKIE_NAME, session.token, getSessionCookieOptions(safeDurationHours));
+    res.cookie(SESSION_COOKIE_NAME, session.token, getSessionCookieOptions(safeDurationHours, req));
 
     // Write audit log in PostgreSQL audit_logs
     await addPostgresAuditLog({
@@ -189,7 +189,7 @@ authRouter.post('/logout', async (req: AuthenticatedRequest, res: Response) => {
       await revokePostgresSession(token);
     } catch (err: any) {
       console.error('Logout error:', err.message);
-      res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions());
+      res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions(req));
       return res.status(500).json({
         success: false,
         error: 'Failed to revoke session from database',
@@ -198,7 +198,7 @@ authRouter.post('/logout', async (req: AuthenticatedRequest, res: Response) => {
     }
   }
 
-  res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions());
+  res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions(req));
 
   return res.json({
     success: true,
@@ -224,7 +224,7 @@ authRouter.post('/logout-all', requireAuth, async (req: AuthenticatedRequest, re
     }).catch(() => {});
   } catch (err: any) {
     console.error('Logout-all error:', err.message);
-    res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions());
+    res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions(req));
     return res.status(500).json({
       success: false,
       error: 'Failed to revoke all sessions from database',
@@ -232,7 +232,7 @@ authRouter.post('/logout-all', requireAuth, async (req: AuthenticatedRequest, re
     });
   }
 
-  res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions());
+  res.clearCookie(SESSION_COOKIE_NAME, getClearCookieOptions(req));
 
   return res.json({
     success: true,
@@ -294,7 +294,7 @@ authRouter.post('/change-password', requireAuth, async (req: AuthenticatedReques
     const durationHours = Number(process.env.SESSION_DURATION_HOURS || 24);
     const safeDurationHours = Number.isFinite(durationHours) && durationHours >= 1 && durationHours <= 720 ? durationHours : 24;
     const freshSession = await createPostgresSession(user.id, ip, userAgent, safeDurationHours);
-    res.cookie(SESSION_COOKIE_NAME, freshSession.token, getSessionCookieOptions(safeDurationHours));
+    res.cookie(SESSION_COOKIE_NAME, freshSession.token, getSessionCookieOptions(safeDurationHours, req));
 
     await addPostgresAuditLog({
       user_id: user.id,
